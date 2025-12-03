@@ -1,19 +1,15 @@
 """
 SQLite Database Utilities using SQLAlchemy
 Contains the most commonly used database operations
+For use with LLM agents
 """
 
-from sqlalchemy import create_engine, Column, Integer, String, Float, DateTime, Boolean, Text, select, update, delete
+from typing import List, Optional, Dict, Any
+from sqlalchemy import create_engine, text, or_, and_
 from sqlalchemy.orm import declarative_base, Session, sessionmaker
 from sqlalchemy.exc import SQLAlchemyError, IntegrityError
-from datetime import datetime
-from typing import List, Optional, Dict, Any
-import os
 from dotenv import load_dotenv
 load_dotenv(override=True)
-
-# Database configuration
-# DATABASE_URL = os.getenv("DATABASE_URL")
 
 class DatabaseManager:
     """Manager class for all database operations with SQLAlchemy"""
@@ -47,7 +43,7 @@ class DatabaseManager:
             print(f"Error initializing database engine: {e}")
             raise
 
-    def create_tables(self, table_names: List[str] = None):
+    def create_tables(self, table_names: List[str] = None) -> Dict[str, Any]:
         """
         Create tables based on table names
         
@@ -56,7 +52,7 @@ class DatabaseManager:
                         If None, creates all tables.
                    
         Returns:
-            None
+            Response dict with status and message
             
         Examples:
             # Create all tables
@@ -72,25 +68,28 @@ class DatabaseManager:
             if table_names is None:
                 # Create all tables
                 self.base.metadata.create_all(self.engine)
-                print("All tables created successfully")
+                return self._response("success", "All tables created successfully")
             else:
                 # Normalize to list
                 if isinstance(table_names, str):
                     table_names = [table_names]
                 
                 # Create tables for specific names only
+                warnings = []
                 for table_name in table_names:
                     if table_name in self.base.metadata.tables:
                         self.base.metadata.tables[table_name].create(self.engine, checkfirst=True)
                     else:
-                        print(f"Warning: Table '{table_name}' not found in metadata")
+                        warnings.append(f"Table '{table_name}' not found in metadata")
                 
-                print(f"Tables created successfully: {', '.join(table_names)}")
+                msg = f"Tables created successfully: {', '.join(table_names)}"
+                if warnings:
+                    msg += f". Warnings: {'; '.join(warnings)}"
+                return self._response("success", msg, {"tables": table_names})
         except SQLAlchemyError as e:
-            print(f"Error creating tables: {e}")
-            raise
+            return self._response("error", f"Error creating tables: {str(e)}")
 
-    def drop_tables(self, table_names: List[str] = None):
+    def drop_tables(self, table_names: List[str] = None) -> Dict[str, Any]:
         """
         Drop tables (use with caution)
         
@@ -99,7 +98,7 @@ class DatabaseManager:
                         If None, drops all tables.
                    
         Returns:
-            None
+            Response dict with status and message
             
         Examples:
             # Drop all tables
@@ -115,23 +114,26 @@ class DatabaseManager:
             if table_names is None:
                 # Drop all tables
                 self.base.metadata.drop_all(self.engine)
-                print("All tables dropped successfully")
+                return self._response("success", "All tables dropped successfully")
             else:
                 # Normalize to list
                 if isinstance(table_names, str):
                     table_names = [table_names]
                 
                 # Drop tables for specific names only
+                warnings = []
                 for table_name in table_names:
                     if table_name in self.base.metadata.tables:
                         self.base.metadata.tables[table_name].drop(self.engine, checkfirst=True)
                     else:
-                        print(f"Warning: Table '{table_name}' not found in metadata")
+                        warnings.append(f"Table '{table_name}' not found in metadata")
                 
-                print(f"Tables dropped successfully: {', '.join(table_names)}")
+                msg = f"Tables dropped successfully: {', '.join(table_names)}"
+                if warnings:
+                    msg += f". Warnings: {'; '.join(warnings)}"
+                return self._response("success", msg, {"tables": table_names})
         except SQLAlchemyError as e:
-            print(f"Error dropping tables: {e}")
-            raise
+            return self._response("error", f"Error dropping tables: {str(e)}")
 
     def get_model_by_table_name(self, table_name: str) -> Optional[type]:
         """
@@ -159,58 +161,60 @@ class DatabaseManager:
                 model_class = model.class_
                 if hasattr(model_class, '__tablename__') and model_class.__tablename__ == table_name:
                     return model_class
-            
-            print(f"Model for table '{table_name}' not found")
             return None
-        except Exception as e:
-            print(f"Error retrieving model: {e}")
+        except Exception:
             return None
 
     def get_session(self) -> Session:
         """Get a new database session"""
         return self.SessionLocal()
+    
+    def _response(self, status: str, message: str, data: Any = None) -> Dict[str, Any]:
+        """Create a standardized response dictionary for LLM compatibility"""
+        return {
+            "status": status,
+            "message": message,
+            "data": data
+        }
 
     # ==================== CREATE Operations ====================
 
-    def create(self, table_name: str, **kwargs) -> Optional[dict]:
+    def create(self, table_name: str, data: Dict[str, Any]) -> Dict[str, Any]:
         """
         Create and insert a single record
         
         Args:
             table_name: Name of the table
-            **kwargs: Column name and value pairs for the new record
+            data: Dictionary with column names and values for the new record
             
         Returns:
-            The created record as dictionary with ID, or None if failed
+            Response dict with status, message, and record data
             
         Examples:
-            result = db.create('users', username='john', email='john@example.com', is_active=True)
+            result = db.create('users', {'username': 'john', 'email': 'john@example.com', 'is_active': True})
         """
         model = self.get_model_by_table_name(table_name)
         if not model:
-            return None
+            return self._response("error", f"Model for table '{table_name}' not found")
         
         session = self.get_session()
         try:
-            # Create instance from kwargs
-            model_instance = model(**kwargs)
+            model_instance = model(**data)
             session.add(model_instance)
             session.commit()
             session.refresh(model_instance)
-            print(f"Record created successfully in {table_name}")
-            return {col.name: getattr(model_instance, col.name) for col in model.__table__.columns}
+            record = {col.name: getattr(model_instance, col.name) for col in model.__table__.columns}
+            return self._response("success", f"Record created successfully in {table_name}", record)
         except IntegrityError as e:
             session.rollback()
-            print(f"Integrity error: {e}")
-            return None
+            return self._response("error", f"Integrity error: {str(e)}")
         except SQLAlchemyError as e:
             session.rollback()
-            print(f"Error creating record: {e}")
-            return None
+            return self._response("error", f"Error creating record: {str(e)}")
         finally:
             session.close()
 
-    def create_bulk(self, table_name: str, records: List[dict]) -> bool:
+    def create_bulk(self, table_name: str, records: List[dict]) -> Dict[str, Any]:
         """
         Create multiple records in bulk
         
@@ -219,7 +223,7 @@ class DatabaseManager:
             records: List of dictionaries with column names and values
             
         Returns:
-            True if successful, False otherwise
+            Response dict with status, message, and count of created records
             
         Examples:
             records = [
@@ -230,30 +234,27 @@ class DatabaseManager:
         """
         model = self.get_model_by_table_name(table_name)
         if not model:
-            return False
+            return self._response("error", f"Model for table '{table_name}' not found")
         
         session = self.get_session()
         try:
-            # Create instances from dicts
             model_instances = [model(**record) for record in records]
             session.add_all(model_instances)
             session.commit()
-            print(f"{len(model_instances)} records created successfully in {table_name}")
-            return True
+            count = len(model_instances)
+            return self._response("success", f"{count} records created successfully in {table_name}", {"count": count})
         except IntegrityError as e:
             session.rollback()
-            print(f"Integrity error: {e}")
-            return False
+            return self._response("error", f"Integrity error: {str(e)}")
         except SQLAlchemyError as e:
             session.rollback()
-            print(f"Error creating bulk records: {e}")
-            return False
+            return self._response("error", f"Error creating bulk records: {str(e)}")
         finally:
             session.close()
 
     # ==================== READ Operations ====================
 
-    def read_by_id(self, table_name: str, record_id: int) -> Optional[dict]:
+    def read_by_id(self, table_name: str, record_id: int) -> Dict[str, Any]:
         """
         Read a record by ID
         
@@ -262,7 +263,7 @@ class DatabaseManager:
             record_id: ID of the record
             
         Returns:
-            Dictionary with record data, or None if not found
+            Response dict with status, message, and record data
             
         Examples:
             user = db.read_by_id('users', 1)
@@ -270,21 +271,25 @@ class DatabaseManager:
         """
         model = self.get_model_by_table_name(table_name)
         if not model:
-            return None
+            return self._response("error", f"Model for table '{table_name}' not found")
         
         session = self.get_session()
         try:
             result = session.query(model).filter(model.id == record_id).first()
             if result:
-                return {col.name: getattr(result, col.name) for col in model.__table__.columns}
-            return None
+                record = {col.name: getattr(result, col.name) for col in model.__table__.columns}
+                return self._response("success", f"Record found", record)
+            return self._response("error", f"Record with ID {record_id} not found")
         except SQLAlchemyError as e:
-            print(f"Error reading record: {e}")
-            return None
+            return self._response("error", f"Error reading record: {str(e)}")
         finally:
             session.close()
 
-    def read_all(self, table_name: str, limit: Optional[int] = None, offset: int = 0) -> List[dict]:
+    def read_all(self,
+        table_name: str,
+        limit: Optional[int] = None,
+        offset: int = 0
+    ) -> Dict[str, Any]:
         """
         Read all records with optional pagination
         
@@ -294,14 +299,14 @@ class DatabaseManager:
             offset: Number of records to skip
             
         Returns:
-            List of records as dictionaries
+            Response dict with status, message, and list of records
             
         Examples:
             records = db.read_all('users', limit=10)
         """
         model = self.get_model_by_table_name(table_name)
         if not model:
-            return []
+            return self._response("error", f"Model for table '{table_name}' not found", {"records": []})
         
         session = self.get_session()
         try:
@@ -309,37 +314,39 @@ class DatabaseManager:
             if limit:
                 query = query.limit(limit)
             results = query.all()
-            return [{col.name: getattr(r, col.name) for col in model.__table__.columns} for r in results]
+            records = [{col.name: getattr(r, col.name) for col in model.__table__.columns} for r in results]
+            return self._response("success", f"Retrieved {len(records)} records", {"records": records, "count": len(records)})
         except SQLAlchemyError as e:
-            print(f"Error reading all records: {e}")
-            return []
+            return self._response("error", f"Error reading all records: {str(e)}", {"records": []})
         finally:
             session.close()
 
-    def read_with_filter(self, table_name: str, use_or: bool = False, **filters) -> List[dict]:
+    def read_with_filter(self,
+        table_name: str,
+        filters: Dict[str, Any],
+        use_or: bool = False
+    ) -> Dict[str, Any]:
         """
-        Read records with multiple filter conditions
+        Read records with multiple filter conditions(matches exact column string)
         
         Args:
             table_name: Name of the table
+            filters: Dictionary of column names and values for filtering
             use_or: If True, use OR logic; if False (default), use AND logic
-            **filters: Column name and value pairs for filtering
             
         Returns:
-            List of filtered records as dictionaries
+            Response dict with status, message, and list of records
             
         Examples:
             # AND logic (default): is_active=True AND is_admin=True
-            db.read_with_filter('users', is_active=True, is_admin=True)
+            db.read_with_filter('users', {'is_active': True, 'is_admin': True})
             
             # OR logic: is_active=True OR is_admin=True
-            db.read_with_filter('users', use_or=True, is_active=True, is_admin=True)
+            db.read_with_filter('users', {'is_active': True, 'is_admin': True}, use_or=True)
         """
-        from sqlalchemy import or_, and_
-        
         model = self.get_model_by_table_name(table_name)
         if not model:
-            return []
+            return self._response("error", f"Model for table '{table_name}' not found", {"records": []})
         
         session = self.get_session()
         try:
@@ -347,7 +354,8 @@ class DatabaseManager:
             
             if not filters:
                 results = query.all()
-                return [{col.name: getattr(r, col.name) for col in model.__table__.columns} for r in results]
+                records = [{col.name: getattr(r, col.name) for col in model.__table__.columns} for r in results]
+                return self._response("success", f"Retrieved {len(records)} records", {"records": records, "count": len(records)})
             
             # Build filter conditions
             conditions = []
@@ -362,14 +370,14 @@ class DatabaseManager:
                 query = query.filter(and_(*conditions))
             
             results = query.all()
-            return [{col.name: getattr(r, col.name) for col in model.__table__.columns} for r in results]
+            records = [{col.name: getattr(r, col.name) for col in model.__table__.columns} for r in results]
+            return self._response("success", f"Retrieved {len(records)} records", {"records": records, "count": len(records)})
         except SQLAlchemyError as e:
-            print(f"Error reading filtered records: {e}")
-            return []
+            return self._response("error", f"Error reading filtered records: {str(e)}", {"records": []})
         finally:
             session.close()
 
-    def read_with_conditions(self, table_name: str, conditions: List[tuple]) -> List[dict]:
+    def read_with_conditions(self, table_name: str, conditions: List[tuple]) -> Dict[str, Any]:
         """
         Read records with complex filter conditions
         
@@ -379,7 +387,7 @@ class DatabaseManager:
                        operators: 'eq', 'ne', 'gt', 'gte', 'lt', 'lte', 'like', 'in'
                        
         Returns:
-            List of filtered records as dictionaries
+            Response dict with status, message, and list of records
             
         Examples:
             conditions = [
@@ -391,7 +399,7 @@ class DatabaseManager:
         """
         model = self.get_model_by_table_name(table_name)
         if not model:
-            return []
+            return self._response("error", f"Model for table '{table_name}' not found", {"records": []})
         
         session = self.get_session()
         try:
@@ -416,31 +424,34 @@ class DatabaseManager:
                     elif operator == 'in':
                         query = query.filter(col.in_(value))
             results = query.all()
-            return [{col.name: getattr(r, col.name) for col in model.__table__.columns} for r in results]
+            records = [{col.name: getattr(r, col.name) for col in model.__table__.columns} for r in results]
+            return self._response("success", f"Retrieved {len(records)} records", {"records": records, "count": len(records)})
         except SQLAlchemyError as e:
-            print(f"Error reading records with conditions: {e}")
-            return []
+            return self._response("error", f"Error reading records with conditions: {str(e)}", {"records": []})
         finally:
             session.close()
 
-    def count(self, table_name: str, **filters) -> int:
+    def count(self, table_name: str, filters: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
         """
         Count records with optional filters
         
         Args:
             table_name: Name of the table
-            **filters: Optional filter conditions
+            filters: Dictionary of filter conditions
             
         Returns:
-            Number of records
+            Response dict with status, message, and count
             
         Examples:
             total = db.count('users')
-            active = db.count('users', is_active=True)
+            active = db.count('users', {'is_active': True})
         """
         model = self.get_model_by_table_name(table_name)
         if not model:
-            return 0
+            return self._response("error", f"Model for table '{table_name}' not found", {"count": 0})
+        
+        if not filters:
+            filters = {}
         
         session = self.get_session()
         try:
@@ -449,30 +460,29 @@ class DatabaseManager:
                 if hasattr(model, key):
                     query = query.filter(getattr(model, key) == value)
             count = query.count()
-            return count
+            return self._response("success", f"Found {count} records", {"count": count})
         except SQLAlchemyError as e:
-            print(f"Error counting records: {e}")
-            return 0
+            return self._response("error", f"Error counting records: {str(e)}", {"count": 0})
         finally:
             session.close()
 
-    def exists(self, table_name: str, **filters) -> bool:
+    def exists(self, table_name: str, filters: Dict[str, Any]) -> Dict[str, Any]:
         """
         Check if a record exists
         
         Args:
             table_name: Name of the table
-            **filters: Filter conditions
+            filters: Dictionary of filter conditions
             
         Returns:
-            True if record exists, False otherwise
+            Response dict with status, message, and exists flag
             
         Examples:
-            exists = db.exists('users', username='john')
+            exists = db.exists('users', {'username': 'john'})
         """
         model = self.get_model_by_table_name(table_name)
         if not model:
-            return False
+            return self._response("error", f"Model for table '{table_name}' not found", {"exists": False})
         
         session = self.get_session()
         try:
@@ -481,58 +491,54 @@ class DatabaseManager:
                 if hasattr(model, key):
                     query = query.filter(getattr(model, key) == value)
             exists = session.query(query.exists()).scalar()
-            return exists
+            msg = "Record exists" if exists else "Record not found"
+            return self._response("success", msg, {"exists": bool(exists)})
         except SQLAlchemyError as e:
-            print(f"Error checking existence: {e}")
-            return False
+            return self._response("error", f"Error checking existence: {str(e)}", {"exists": False})
         finally:
             session.close()
 
     # ==================== UPDATE Operations ====================
 
-    def update(self, table_name: str, record_id: int, **updates) -> bool:
+    def update(self, table_name: str, record_id: int, updates: Dict[str, Any]) -> Dict[str, Any]:
         """
         Update a single record by ID
         
         Args:
             table_name: Name of the table
             record_id: ID of the record to update
-            **updates: Column name and value pairs to update
+            updates: Dictionary of column names and values to update
             
         Returns:
-            True if successful, False otherwise
+            Response dict with status and message
             
         Examples:
-            db.update('users', 1, username='newname', is_active=False)
+            db.update('users', 1, {'username': 'newname', 'is_active': False})
         """
         model = self.get_model_by_table_name(table_name)
         if not model:
-            return False
+            return self._response("error", f"Model for table '{table_name}' not found")
         
         session = self.get_session()
         try:
-            # Convert column names to mapped attributes
             update_dict = {}
             for key, value in updates.items():
                 if hasattr(model, key):
                     update_dict[getattr(model, key)] = value
             
             if not update_dict:
-                print(f"No valid columns to update")
-                return False
+                return self._response("error", "No valid columns to update")
             
             session.query(model).filter(model.id == record_id).update(update_dict)
             session.commit()
-            print(f"Record {record_id} updated successfully in {table_name}")
-            return True
+            return self._response("success", f"Record {record_id} updated successfully in {table_name}", {"record_id": record_id})
         except SQLAlchemyError as e:
             session.rollback()
-            print(f"Error updating record: {e}")
-            return False
+            return self._response("error", f"Error updating record: {str(e)}")
         finally:
             session.close()
 
-    def update_by_id(self, table_name: str, record_id: int, updates: Dict[str, Any]) -> bool:
+    def update_by_id(self, table_name: str, record_id: int, updates: Dict[str, Any]) -> Dict[str, Any]:
         """
         Update a record by ID with a dictionary of updates
         
@@ -542,56 +548,52 @@ class DatabaseManager:
             updates: Dictionary of column names and new values
             
         Returns:
-            True if successful, False otherwise
+            Response dict with status and message
             
         Examples:
             db.update_by_id('users', 1, {'username': 'jane', 'is_active': False})
         """
         model = self.get_model_by_table_name(table_name)
         if not model:
-            return False
+            return self._response("error", f"Model for table '{table_name}' not found")
         
         session = self.get_session()
         try:
-            # Convert column names to mapped attributes
             update_dict = {}
             for key, value in updates.items():
                 if hasattr(model, key):
                     update_dict[getattr(model, key)] = value
             
             if not update_dict:
-                print(f"No valid columns to update")
-                return False
+                return self._response("error", "No valid columns to update")
             
             session.query(model).filter(model.id == record_id).update(update_dict)
             session.commit()
-            print(f"Record {record_id} updated successfully in {table_name}")
-            return True
+            return self._response("success", f"Record {record_id} updated successfully in {table_name}", {"record_id": record_id})
         except SQLAlchemyError as e:
             session.rollback()
-            print(f"Error updating record: {e}")
-            return False
+            return self._response("error", f"Error updating record: {str(e)}")
         finally:
             session.close()
 
-    def update_bulk(self, table_name: str, updates: Dict[str, Any], **filters) -> int:
+    def update_bulk(self, table_name: str, updates: Dict[str, Any], filters: Dict[str, Any]) -> Dict[str, Any]:
         """
         Update multiple records matching filter conditions
         
         Args:
             table_name: Name of the table
             updates: Dictionary of column names and new values
-            **filters: Filter conditions
+            filters: Dictionary of filter conditions
             
         Returns:
-            Number of records updated
+            Response dict with status, message, and count of updated records
             
         Examples:
-            db.update_bulk('users', {'is_active': True}, role='admin')
+            db.update_bulk('users', {'is_active': True}, {'role': 'admin'})
         """
         model = self.get_model_by_table_name(table_name)
         if not model:
-            return 0
+            return self._response("error", f"Model for table '{table_name}' not found", {"count": 0})
         
         session = self.get_session()
         try:
@@ -600,30 +602,26 @@ class DatabaseManager:
                 if hasattr(model, key):
                     query = query.filter(getattr(model, key) == value)
             
-            # Convert column names to mapped attributes
             update_dict = {}
             for key, value in updates.items():
                 if hasattr(model, key):
                     update_dict[getattr(model, key)] = value
             
             if not update_dict:
-                print(f"No valid columns to update")
-                return 0
+                return self._response("error", "No valid columns to update", {"count": 0})
             
             count = query.update(update_dict)
             session.commit()
-            print(f"{count} records updated successfully in {table_name}")
-            return count
+            return self._response("success", f"{count} records updated successfully in {table_name}", {"count": count})
         except SQLAlchemyError as e:
             session.rollback()
-            print(f"Error updating records: {e}")
-            return 0
+            return self._response("error", f"Error updating records: {str(e)}", {"count": 0})
         finally:
             session.close()
 
     # ==================== DELETE Operations ====================
 
-    def delete_by_id(self, table_name: str, record_id: int) -> bool:
+    def delete_by_id(self, table_name: str, record_id: int) -> Dict[str, Any]:
         """
         Delete a record by ID
         
@@ -632,45 +630,43 @@ class DatabaseManager:
             record_id: ID of the record to delete
             
         Returns:
-            True if successful, False otherwise
+            Response dict with status and message
             
         Examples:
             db.delete_by_id('users', 1)
         """
         model = self.get_model_by_table_name(table_name)
         if not model:
-            return False
+            return self._response("error", f"Model for table '{table_name}' not found")
         
         session = self.get_session()
         try:
             session.query(model).filter(model.id == record_id).delete()
             session.commit()
-            print(f"Record {record_id} deleted successfully from {table_name}")
-            return True
+            return self._response("success", f"Record {record_id} deleted successfully from {table_name}", {"record_id": record_id})
         except SQLAlchemyError as e:
             session.rollback()
-            print(f"Error deleting record: {e}")
-            return False
+            return self._response("error", f"Error deleting record: {str(e)}")
         finally:
             session.close()
 
-    def delete_with_filter(self, table_name: str, **filters) -> int:
+    def delete_with_filter(self, table_name: str, filters: Dict[str, Any]) -> Dict[str, Any]:
         """
         Delete records matching filter conditions
         
         Args:
             table_name: Name of the table
-            **filters: Filter conditions
+            filters: Dictionary of filter conditions
             
         Returns:
-            Number of records deleted
+            Response dict with status, message, and count of deleted records
             
         Examples:
-            deleted = db.delete_with_filter('users', is_active=False)
+            deleted = db.delete_with_filter('users', {'is_active': False})
         """
         model = self.get_model_by_table_name(table_name)
         if not model:
-            return 0
+            return self._response("error", f"Model for table '{table_name}' not found", {"count": 0})
         
         session = self.get_session()
         try:
@@ -680,16 +676,14 @@ class DatabaseManager:
                     query = query.filter(getattr(model, key) == value)
             count = query.delete()
             session.commit()
-            print(f"{count} records deleted successfully from {table_name}")
-            return count
+            return self._response("success", f"{count} records deleted successfully from {table_name}", {"count": count})
         except SQLAlchemyError as e:
             session.rollback()
-            print(f"Error deleting records: {e}")
-            return 0
+            return self._response("error", f"Error deleting records: {str(e)}", {"count": 0})
         finally:
             session.close()
 
-    def delete_all(self, table_name: str) -> int:
+    def delete_all(self, table_name: str) -> Dict[str, Any]:
         """
         Delete all records from a table (use with caution)
         
@@ -697,25 +691,23 @@ class DatabaseManager:
             table_name: Name of the table
             
         Returns:
-            Number of records deleted
+            Response dict with status, message, and count of deleted records
             
         Examples:
             db.delete_all('users')
         """
         model = self.get_model_by_table_name(table_name)
         if not model:
-            return 0
+            return self._response("error", f"Model for table '{table_name}' not found", {"count": 0})
         
         session = self.get_session()
         try:
             count = session.query(model).delete()
             session.commit()
-            print(f"All {count} records deleted successfully from {table_name}")
-            return count
+            return self._response("success", f"All {count} records deleted successfully from {table_name}", {"count": count})
         except SQLAlchemyError as e:
             session.rollback()
-            print(f"Error deleting all records: {e}")
-            return 0
+            return self._response("error", f"Error deleting all records: {str(e)}", {"count": 0})
         finally:
             session.close()
 
@@ -839,92 +831,18 @@ class DatabaseManager:
 
     # ==================== UTILITIES ====================
 
-    def close(self):
+    def close(self) -> Dict[str, Any]:
         """Close the database connection"""
         if self.engine:
             self.engine.dispose()
-            print("Database connection closed")
+            return self._response("success", "Database connection closed")
+        return self._response("error", "No active database connection")
 
-    def health_check(self) -> bool:
+    def health_check(self) -> Dict[str, Any]:
         """Check if database connection is healthy"""
         try:
             with self.engine.connect() as conn:
-                conn.execute("SELECT 1")
-            print("Database health check passed")
-            return True
+                conn.execute(text("SELECT 1"))
+            return self._response("success", "Database health check passed", {"healthy": True})
         except Exception as e:
-            print(f"Database health check failed: {e}")
-            return False
-
-
-# ==================== Example ORM Models ====================
-
-# class User(Base):
-#     """Example User model"""
-#     __tablename__ = "users"
-
-#     id = Column(Integer, primary_key=True)
-#     username = Column(String(50), unique=True, nullable=False)
-#     email = Column(String(100), unique=True, nullable=False)
-#     password = Column(String(255), nullable=False)
-#     is_active = Column(Boolean, default=True)
-#     created_at = Column(DateTime, default=datetime.utcnow)
-#     updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
-
-#     def __repr__(self):
-#         return f"<User(id={self.id}, username={self.username}, email={self.email})>"
-
-
-# class Product(Base):
-#     """Example Product model"""
-#     __tablename__ = "products"
-
-#     id = Column(Integer, primary_key=True)
-#     name = Column(String(100), nullable=False)
-#     description = Column(Text)
-#     price = Column(Float, nullable=False)
-#     quantity = Column(Integer, default=0)
-#     is_available = Column(Boolean, default=True)
-#     created_at = Column(DateTime, default=datetime.utcnow)
-#     updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
-
-#     def __repr__(self):
-#         return f"<Product(id={self.id}, name={self.name}, price={self.price})>"
-
-
-# class Order(Base):
-#     """Example Order model"""
-#     __tablename__ = "orders"
-
-#     id = Column(Integer, primary_key=True)
-#     user_id = Column(Integer, nullable=False)
-#     product_id = Column(Integer, nullable=False)
-#     quantity = Column(Integer, nullable=False)
-#     total_price = Column(Float, nullable=False)
-#     status = Column(String(50), default="pending")
-#     created_at = Column(DateTime, default=datetime.utcnow)
-#     updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
-
-#     def __repr__(self):
-#         return f"<Order(id={self.id}, user_id={self.user_id}, status={self.status})>"
-
-
-# ==================== Initialization ====================
-
-# You can now create DatabaseManager instances with custom Base objects:
-# Example 1: Use default Base
-# db = DatabaseManager()
-
-# Example 2: Create DatabaseManager with custom Base
-# custom_base = declarative_base()
-# db = DatabaseManager(base=custom_base)
-
-# Example 3: Multiple managers with different bases
-# base1 = declarative_base()
-# base2 = declarative_base()
-# db1 = DatabaseManager('sqlite:///db1.db', base=base1)
-# db2 = DatabaseManager('sqlite:///db2.db', base=base2)
-
-# Create a default database manager instance with auto-created base
-# db = DatabaseManager()
-
+            return self._response("error", f"Database health check failed: {str(e)}", {"healthy": False})
