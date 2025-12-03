@@ -46,6 +46,18 @@ The implementation notebook can be found [here](implementation_notebook_final.ip
     - Google
         - AI Studio account: Sign up for an AI Studio account and generate an [API key](https://aistudio.google.com/app/api-keys)
 
+## Quick note on using ADK Web
+- setup agent for evaluation using `adk create`
+```
+adk create <agent-name> --model gemini-2.5-flash --api_key $GOOGLE_API_KEY
+```
+- run the agent using `adk web`
+    - `--log_level DEBUG` for debug details
+    - `--session_service_uri` store session interactions. Example URI: `sqlite:///./sessions.db`
+```
+adk web --log_level DEBUG --session_service_uri sqlite:///./sessions.db
+```
+
 # ADK Web demo
 ## Translation Agent
 ![translation_agent_demo](readme_assets/adk_web_demo_translation.gif)
